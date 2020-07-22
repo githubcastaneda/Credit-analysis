@@ -1,0 +1,160 @@
+library(gains)
+library(caret)
+library(ROCR)
+library(Hmisc)
+library(tidyverse)
+library(ggplot2)
+library(reshape)
+library(leaps)
+library(plyr)
+library(DescTools)
+
+credit.df <- read.csv("Traincredit.csv")
+
+# Remove ID column, convert to factor
+credit.id <- credit.df[,-1]
+credit.id$SeriousDlqin2yrs <- as.factor(credit.id$SeriousDlqin2yrs)
+table(credit.df$SeriousDlqin2yrs == credit.id$SeriousDlqin2yrs)
+
+# Base accuracy
+table(credit.df$SeriousDlqin2yrs)
+round((1 - 10026/139974), 3)
+
+# Partition sets
+set.seed(47)
+index <- sample(nrow(credit.id), nrow(credit.id)*0.8)
+train.df <- credit.id[index,]
+valid.df <- credit.id[-index,]
+# Delinquent train
+table(train.df$SeriousDlqin2yrs)
+
+# Undersample
+c <- train.df[train.df$SeriousDlqin2yrs == 0,]
+d <- c[sample(nrow(c), 8034),]
+f <- train.df[train.df$SeriousDlqin2yrs == 1,]
+r <- rbind(d, f)
+table(r$SeriousDlqin2yrs == 1)
+
+# Correlation matrix
+cor <- na.omit(r)
+cor.mat <- round(cor(cor[,-1]),2)
+melted.cor.mat <- melt(cor.mat)
+ggplot(melted.cor.mat, aes(x = X1, y = X2, fill = value)) +
+  geom_tile() + geom_text(aes(x = X1, y = X2, label = value)) + ggtitle("Correlation Matrix") +
+  theme(plot.title = element_text(hjust = 0.5)) + labs(x = "", y = "")
+
+# Exhaustive search
+search <- regsubsets(SeriousDlqin2yrs ~ ., data = r, nbest = 1, nvmax = dim(r)[2], method = "exhaustive")
+sum <- summary(search)
+plot(search, scale = "adjr2")
+
+# Days late transform/ reduction
+valid.df$DaysLate <- valid.df$NumberOfTime30.59DaysPastDueNotWorse + valid.df$NumberOfTime60.89DaysPastDueNotWorse
+valid.df <- valid.df[, -c(4,7,8,9,10)]
+r$DaysLate <- r$NumberOfTime30.59DaysPastDueNotWorse + r$NumberOfTime60.89DaysPastDueNotWorse
+r <- r[, -c(4,7,8,9,10)]
+
+# Clean data --------------------
+summary(r)
+str(r)
+
+# Revolving utilization - cap
+hist(r$RevolvingUtilizationOfUnsecuredLines)
+table(r$RevolvingUtilizationOfUnsecuredLines > 1)
+table(r$RevolvingUtilizationOfUnsecuredLines > 2)
+
+1.5*(.942-.07)
+r$RevolvingUtilizationOfUnsecuredLines[r$RevolvingUtilizationOfUnsecuredLines > 1] <- 0.44
+
+# Debt ratio - cap
+hist(r$DebtRatio)
+table(r$DebtRatio > 1)
+table(r$DebtRatio > 2)
+
+1.5*(0.89-0.18)
+r$DebtRatio[r$DebtRatio > 1.065] <- 0.394
+
+# Income - log/log10
+hist(log(r$MonthlyIncome))
+r$MonthlyIncome <- log2(r$MonthlyIncome + 0.0001)
+
+hist(r$MonthlyIncome)
+table(r$MonthlyIncome > 100000)
+table(r$MonthlyIncome > 50000)
+tail(sort(r$MonthlyIncome), 50)
+
+# Dependents - sub NA/outliers w/ mean
+table(r$NumberOfDependents, useNA = 'ifany')
+mean(r$NumberOfDependents, na.rm = TRUE)
+hist(r$NumberOfDependents)
+r$NumberOfDependents[is.na(r$NumberOfDependents)] <- 0.83
+r$NumberOfDependents[r$NumberOfDependents > 6] <- 0.83
+
+# ------------------------------
+
+# Train Logit model
+
+logit.reg <- glm(SeriousDlqin2yrs ~ ., data = r, family = "binomial")
+options(scipen = 999)
+summary(logit.reg)
+BIC(logit.reg)
+PseudoR2(logit.reg, which = "McFadden") # CoxSnell
+# Predit on valid.df
+pred <- predict(logit.reg, newdata = valid.df, type = "response")
+confusionMatrix(table(pred >= 0.5, valid.df$SeriousDlqin2yrs == "1"))
+
+
+# Lift charts
+gain <- gains(valid.df$SeriousDlqin2yrs, pred, groups=10)
+plot(c(0,gain$cume.pct.of.total*sum(valid.df$SeriousDlqin2yrs))~c(0,gain$cume.obs), 
+     xlab="# cases", ylab="Cumulative", main="", type="l")
+lines(c(0,sum(valid.df$SeriousDlqin2yrs))~c(0, dim(valid.df)[1]), lty=2)
+# Decile-wise chart
+heights <- gain$mean.resp/mean(as.numeric(valid.df$SeriousDlqin2yrs))
+midpoints <- barplot(heights, names.arg = gain$depth, ylim = c(0,0.5), 
+                     xlab = "Percentile", ylab = "Mean Number of Delinquents", main = "Decile-wise lift chart")
+text(midpoints, heights+0.2, labels=round(heights, 1), cex = 0.8)
+
+# -------------------------------
+
+library(dplyr)
+library(rpart.plot)
+library(rpart)
+library(caret)
+library(e1071)
+library(randomForest)
+library(adabag)
+
+# Trees and Forest
+
+# Method = classification tree, Maxdepth node length, cp req'd reduction in impurity
+tree <- rpart(SeriousDlqin2yrs ~ ., data = r, method = "class", cp = .0001, maxdepth = 5, minsplit = 1)
+printcp(tree)
+prp(tree, type = 1, extra = 1, under = FALSE, split.font = 1, varlen = -10)
+
+# Count leaves / T nodes
+length(tree$frame$var[tree$frame$var == "<leaf>"])
+
+
+# Classify validation data using class tree, type class to generate predicted class membership
+tree.pred <- predict(tree, valid.df, type = "class")
+
+# Confusion matrix for train data
+confusionMatrix(tree.pred, valid.df$SeriousDlqin2yrs)
+
+# Boosted trees, assign weights to obs in a node, w/focus on misclass from previous tree
+boost <- boosting(SeriousDlqin2yrs ~ ., data = r)
+pred.boost <- predict(boost, valid.df)
+confusionMatrix(as.factor(pred.boost$class), valid.df$SeriousDlqin2yrs)
+
+
+# Random forest
+r.omit <- na.omit(r)
+rf <- randomForest(as.factor(SeriousDlqin2yrs) ~ ., data = r.omit, 
+                   ntree = 5000, mtry = 4, nodesize = 10, importance = TRUE, sampsize = 2500) 
+# Plot vars
+varImpPlot(rf, type = 1)
+#create a confusion matrix
+valid.df$SeriousDlqin2yrs <- factor(valid.df$SeriousDlqin2yrs)
+rf.pred <- predict(rf, valid.df)
+confusionMatrix(rf.pred, valid.df$SeriousDlqin2yrs)
