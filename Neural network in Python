@@ -1,0 +1,128 @@
+#Upload and import
+
+import numpy as np
+import tensorflow as tf
+import pandas as pd
+import sklearn as sk
+from sklearn import model_selection
+from sklearn.metrics import confusion_matrix
+from sklearn.preprocessing import StandardScaler
+from sklearn.utils import resample
+from imblearn.over_sampling import ADASYN
+from tensorflow import keras
+
+import random
+np.random.seed(5)
+
+df = pd.read_csv('/content/Traincredit.csv')
+
+print(train.shape)
+
+#Preprocess and split
+
+#Partition
+train, test = sk.model_selection.train_test_split(df, test_size = 0.1)
+
+#Replace nan
+train[['MonthlyIncome']] = train[['MonthlyIncome']].fillna(6657)
+train[['NumberOfDependents']] = train[['NumberOfDependents']].fillna(0.83)
+
+#Labels and predictors
+test_y = test['SeriousDlqin2yrs']
+x_test = test.drop(['SeriousDlqin2yrs'], axis = 1)
+train_y = train['SeriousDlqin2yrs']
+x_train = train.drop(['SeriousDlqin2yrs'], axis = 1)
+
+#Y l/p
+y_test_np = test_y.to_numpy()
+y_train_np = train_y.to_numpy()
+y_train = y_train_np.reshape(-1, 1)
+y_test = y_test_np.reshape(-1, 1)
+
+#Oversample
+x_ada, y_ada = ADASYN(1.0).fit_resample(x_train, y_train)
+
+#Standardize (center and divide st.dev)
+x_train_scale = StandardScaler().fit_transform(x_ada)
+x_test_scale = StandardScaler().fit_transform(x_test)
+
+#Add column names, requires df
+x_ada_pd = pd.DataFrame(data = x_train_scale, columns = x_train.columns)
+y_ada_pd = pd.DataFrame(data = y_ada, columns = ['SeriousDlqin2yrs'])
+
+#Combine data/labels
+z = pd.concat([y_ada_pd, x_ada_pd], axis = 1)
+
+#Shuffle and remove labels
+shuffled_z = sk.utils.shuffle(z)
+y_train_2 = shuffled_z['SeriousDlqin2yrs'].to_numpy().reshape((-1, 1))
+x_train_2 = shuffled_z.drop(['SeriousDlqin2yrs'], axis = 1)
+
+#Review shapes
+print(y_train_2.shape)
+print(y_test.shape)
+print(x_train_2.shape)
+print(x_test_scale.shape)
+np.unique(y_train_2, return_counts = True)
+
+##Building NN
+
+#BatchNorm before Dropout for stability
+#Momentum > .90 if batches small, > .60 larger batches
+#No Bias if BatchNorm used
+#He initialization w/Relu
+
+model = keras.Sequential([
+    keras.layers.Dense(256, activation= tf.keras.layers.LeakyReLU(0.01), kernel_initializer='he_uniform', use_bias = False,
+                       kernel_regularizer=keras.regularizers.l2(0.01)),
+    keras.layers.Dropout(0),
+    keras.layers.BatchNormalization(momentum = 0.99, epsilon = 1e-09),
+    keras.layers.Dense(256, activation= tf.keras.layers.LeakyReLU(0.01), kernel_initializer='he_uniform', use_bias = False, 
+                       kernel_regularizer=keras.regularizers.l2(0.01)),
+    keras.layers.Dropout(0),
+    keras.layers.BatchNormalization(momentum = 0.99, epsilon = 1e-09),
+    keras.layers.Dense(256, activation= tf.keras.layers.LeakyReLU(0.01), kernel_initializer='he_uniform', use_bias = False, 
+                       kernel_regularizer=keras.regularizers.l2(0.01)),
+    keras.layers.Dropout(0),
+    keras.layers.BatchNormalization(momentum = 0.99, epsilon = 1e-09),
+    keras.layers.Dense(512, activation= tf.keras.layers.LeakyReLU(0.01), kernel_initializer='he_uniform', use_bias = False, 
+                       kernel_regularizer=keras.regularizers.l2(0.01)),
+    keras.layers.Dropout(0),
+    keras.layers.BatchNormalization(momentum = 0.99, epsilon = 1e-09),
+    keras.layers.Dense(512, activation= tf.keras.layers.LeakyReLU(0.01), kernel_initializer='he_uniform', use_bias = False, 
+                       kernel_regularizer=keras.regularizers.l2(0.01)),
+    keras.layers.Dropout(0),
+    keras.layers.BatchNormalization(momentum = 0.99, epsilon = 1e-09),
+    keras.layers.Dense(512, activation= tf.keras.layers.LeakyReLU(0.01), kernel_initializer='he_uniform', use_bias = False, 
+                       kernel_regularizer=keras.regularizers.l2(0.01)),
+    keras.layers.Dropout(0),
+    keras.layers.BatchNormalization(momentum = 0.99, epsilon = 1e-09),
+    keras.layers.Dense(256, activation= tf.keras.layers.LeakyReLU(0.01), kernel_initializer='he_uniform', use_bias = False,
+                       kernel_regularizer=keras.regularizers.l2(0.01)),
+    keras.layers.Dropout(0),
+    keras.layers.BatchNormalization(momentum = 0.99, epsilon = 1e-09),
+    keras.layers.Dense(256, activation= tf.keras.layers.LeakyReLU(0.01), kernel_initializer='he_uniform', use_bias = False,
+                       kernel_regularizer=keras.regularizers.l2(0.01)),
+    keras.layers.Dropout(0.7),
+    keras.layers.Dense(256, activation= tf.keras.layers.LeakyReLU(0.01), kernel_initializer='he_uniform', use_bias = False, 
+                       kernel_regularizer=keras.regularizers.l2(0.01)),
+    keras.layers.Dropout(0.7),
+    keras.layers.Dense(1, activation= 'sigmoid', kernel_initializer='glorot_uniform', use_bias = False,
+                       kernel_regularizer=keras.regularizers.l2(0.01))])
+
+model.compile(optimizer=keras.optimizers.Adam(learning_rate=4e-6, beta_1=0.9, beta_2=0.999, epsilon=1e-09),
+              loss=tf.keras.losses.BinaryCrossentropy(from_logits=True),
+              metrics=[keras.metrics.BinaryAccuracy(), keras.metrics.Recall(), keras.metrics.Precision()])
+
+model.fit(x_train_2, y_train_2, batch_size=64, epochs=10, validation_split=0.1, validation_batch_size=64)
+
+train_acc = model.evaluate(x_train_2, y_train_2, batch_size=64)
+test_acc = model.evaluate(x_test_scale, y_test, batch_size=64)
+
+predictions = model.predict_classes(x_test_scale)
+
+#Evaluate
+print(train_acc)
+print(test_acc)
+mat = confusion_matrix(y_test, predictions)
+print(mat)
